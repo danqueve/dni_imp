@@ -1,16 +1,24 @@
 {
-  "name": "init",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "dni-consulta",
+  "version": "1.1.0",
+  "description": "API para consulta de DNI/CUIT via cuitonline.com",
+  "main": "api_server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node api_server.js",
+    "dev": "nodemon api_server.js",
+    "test": "echo \"No hay tests configurados\" && exit 0"
   },
-  "keywords": [],
+  "keywords": ["dni", "cuit", "afip", "argentina"],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "cuitonline": "^1.2.10",
-    "express": "^5.2.1"
+    "dotenv": "^16.0.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^7.0.0",
+    "morgan": "^1.10.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
   }
 }

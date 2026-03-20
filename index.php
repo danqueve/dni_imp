@@ -1,21 +1,30 @@
 <?php
 // ============================================================
-// config.php inline — ajustá estos valores si cambian
+// Variables de entorno desde .env
 // ============================================================
-define('DB_HOST', 'localhost');
-define('DB_USER', 'root');
-define('DB_PASS', '');               // WAMP por defecto no tiene contraseña
-define('DB_NAME', 'consultas_dni');
-define('API_URL', 'http://localhost:3000');
+function loadEnv($file = null) {
+    $file = $file ?? __DIR__ . '/.env';
+    if (!file_exists($file)) return;
+    foreach (file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        if (!$line || $line[0] === '#' || strpos($line, '=') === false) continue;
+        [$k, $v] = explode('=', $line, 2);
+        $_ENV[trim($k)] = trim($v);
+    }
+}
+loadEnv();
+
+define('DB_HOST', $_ENV['DB_HOST'] ?? 'localhost');
+define('DB_USER', $_ENV['DB_USER'] ?? 'root');
+define('DB_PASS', $_ENV['DB_PASS'] ?? '');
+define('DB_NAME', $_ENV['DB_NAME'] ?? 'consultas_dni');
+define('API_URL',  $_ENV['API_URL']  ?? 'http://localhost:3000');
 
 // ============================================================
 // Conexión a MySQL
 // ============================================================
 function getDB() {
     $conn = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-    if ($conn->connect_error) {
-        return null;
-    }
+    if ($conn->connect_error) return null;
     $conn->set_charset('utf8mb4');
     return $conn;
 }
@@ -26,39 +35,70 @@ function getDB() {
 function consultarAPI($endpoint) {
     $url = API_URL . $endpoint;
     $ctx = stream_context_create([
-        'http' => [
-            'timeout'        => 15,
-            'ignore_errors'  => true,
-        ]
+        'http' => ['timeout' => 15, 'ignore_errors' => true]
     ]);
-    $response = @file_get_contents($url, false, $ctx);
-    if ($response === false) return ['error' => 'No se pudo conectar con la API. ¿Está corriendo el servidor Node.js?'];
-    return json_decode($response, true);
+    $response = file_get_contents($url, false, $ctx);
+    if ($response === false) {
+        return ['error' => 'No se pudo conectar con la API. ¿Está corriendo el servidor Node.js?'];
+    }
+    $data = json_decode($response, true);
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        return ['error' => 'Respuesta inválida de la API.'];
+    }
+    return $data;
 }
 
 // ============================================================
-// Guardar en base de datos
+// Guardar o actualizar en base de datos (evita duplicados)
 // ============================================================
 function guardarPersona($data) {
     $db = getDB();
     if (!$db) return false;
-
-    $stmt = $db->prepare("
-        INSERT INTO personas (dni, nombre, cuit_cuil, tipo_persona, genero, nacionalidad, localidad, empleador, ip_consulta)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ");
     $ip = $_SERVER['REMOTE_ADDR'] ?? 'localhost';
-    $stmt->bind_param('sssssssss',
-        $data['dni'],
-        $data['name']        ?? null,
-        $data['cuit']        ?? null,
-        $data['personType']  ?? null,
-        $data['gender']      ?? null,
-        $data['nationality'] ?? null,
-        $data['locality']    ?? null,
-        $data['employer']    ?? null,
-        $ip
-    );
+
+    $check = $db->prepare("SELECT id FROM personas WHERE dni = ?");
+    $check->bind_param('s', $data['dni']);
+    $check->execute();
+    $check->store_result();
+    $existe = $check->num_rows > 0;
+    $check->close();
+
+    if ($existe) {
+        $stmt = $db->prepare("
+            UPDATE personas
+            SET nombre=?, cuit_cuil=?, tipo_persona=?, genero=?, nacionalidad=?,
+                localidad=?, empleador=?, ip_consulta=?, fecha_consulta=NOW()
+            WHERE dni=?
+        ");
+        $stmt->bind_param('sssssssss',
+            $data['name']        ?? null,
+            $data['cuit']        ?? null,
+            $data['personType']  ?? null,
+            $data['gender']      ?? null,
+            $data['nationality'] ?? null,
+            $data['locality']    ?? null,
+            $data['employer']    ?? null,
+            $ip,
+            $data['dni']
+        );
+    } else {
+        $stmt = $db->prepare("
+            INSERT INTO personas (dni, nombre, cuit_cuil, tipo_persona, genero, nacionalidad, localidad, empleador, ip_consulta)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ");
+        $stmt->bind_param('sssssssss',
+            $data['dni'],
+            $data['name']        ?? null,
+            $data['cuit']        ?? null,
+            $data['personType']  ?? null,
+            $data['gender']      ?? null,
+            $data['nationality'] ?? null,
+            $data['locality']    ?? null,
+            $data['employer']    ?? null,
+            $ip
+        );
+    }
+
     $ok = $stmt->execute();
     $stmt->close();
     $db->close();
@@ -66,21 +106,34 @@ function guardarPersona($data) {
 }
 
 // ============================================================
-// Obtener historial
+// Obtener historial con paginación (prepared statement)
 // ============================================================
-function getHistorial($limit = 10) {
+function getHistorial($limit = 10, $offset = 0) {
     $db = getDB();
     if (!$db) return [];
-    $result = $db->query("
+    $stmt = $db->prepare("
         SELECT id, dni, nombre, cuit_cuil, tipo_persona, localidad,
                DATE_FORMAT(fecha_consulta, '%d/%m/%Y %H:%i') AS fecha
         FROM personas
         ORDER BY fecha_consulta DESC
-        LIMIT $limit
+        LIMIT ? OFFSET ?
     ");
-    $rows = $result ? $result->fetch_all(MYSQLI_ASSOC) : [];
+    $stmt->bind_param('ii', $limit, $offset);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $rows   = $result ? $result->fetch_all(MYSQLI_ASSOC) : [];
+    $stmt->close();
     $db->close();
     return $rows;
+}
+
+function getHistorialCount() {
+    $db = getDB();
+    if (!$db) return 0;
+    $result = $db->query("SELECT COUNT(*) AS total FROM personas");
+    $row    = $result ? $result->fetch_assoc() : ['total' => 0];
+    $db->close();
+    return (int) $row['total'];
 }
 
 // ============================================================
@@ -96,9 +149,8 @@ if (isset($_GET['action'])) {
             exit;
         }
         $resultado = consultarAPI('/api/dni/' . $dni);
-
         if (isset($resultado['success']) && $resultado['success']) {
-            $persona = $resultado['data'];
+            $persona        = $resultado['data'];
             $persona['dni'] = $dni;
             guardarPersona($persona);
             echo json_encode(['success' => true, 'data' => $persona]);
@@ -109,16 +161,52 @@ if (isset($_GET['action'])) {
     }
 
     if ($_GET['action'] === 'historial') {
-        echo json_encode(getHistorial(20));
+        $limit  = max(1, min(100, intval($_GET['limit'] ?? 10)));
+        $page   = max(1, intval($_GET['page'] ?? 1));
+        $offset = ($page - 1) * $limit;
+        $total  = getHistorialCount();
+        $rows   = getHistorial($limit, $offset);
+        echo json_encode([
+            'rows'  => $rows,
+            'total' => $total,
+            'page'  => $page,
+            'pages' => (int) ceil($total / max(1, $limit)),
+        ]);
         exit;
     }
 
     if ($_GET['action'] === 'eliminar' && isset($_GET['id'])) {
         $db = getDB();
-        $id = intval($_GET['id']);
-        $db->query("DELETE FROM personas WHERE id = $id");
+        if (!$db) { echo json_encode(['error' => 'Sin conexión a BD']); exit; }
+        $id   = intval($_GET['id']);
+        $stmt = $db->prepare("DELETE FROM personas WHERE id = ?");
+        $stmt->bind_param('i', $id);
+        $ok   = $stmt->execute();
+        $stmt->close();
         $db->close();
-        echo json_encode(['ok' => true]);
+        echo json_encode(['ok' => $ok]);
+        exit;
+    }
+
+    if ($_GET['action'] === 'exportar_csv') {
+        $db = getDB();
+        if (!$db) { http_response_code(500); echo 'Sin conexión a BD'; exit; }
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="historial_' . date('Ymd_His') . '.csv"');
+        $out = fopen('php://output', 'w');
+        fputs($out, "\xEF\xBB\xBF"); // BOM UTF-8 para Excel
+        fputcsv($out, ['ID', 'DNI', 'Nombre', 'CUIT/CUIL', 'Tipo', 'Género', 'Nacionalidad', 'Localidad', 'Empleador', 'IP', 'Fecha']);
+        $result = $db->query("
+            SELECT id, dni, nombre, cuit_cuil, tipo_persona, genero, nacionalidad,
+                   localidad, empleador, ip_consulta,
+                   DATE_FORMAT(fecha_consulta, '%d/%m/%Y %H:%i') AS fecha
+            FROM personas ORDER BY fecha_consulta DESC
+        ");
+        if ($result) {
+            while ($row = $result->fetch_assoc()) fputcsv($out, $row);
+        }
+        fclose($out);
+        $db->close();
         exit;
     }
 
@@ -126,7 +214,9 @@ if (isset($_GET['action'])) {
     exit;
 }
 
-$historial = getHistorial(10);
+$historial      = getHistorial(10, 0);
+$historialTotal = getHistorialCount();
+$historialPages = (int) ceil($historialTotal / 10);
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -303,6 +393,8 @@ $historial = getHistorial(10);
       border: 1px solid var(--border);
     }
     .btn-ghost:hover { color: var(--text); border-color: var(--muted); }
+    .btn-ghost:disabled { opacity: .35; cursor: not-allowed; pointer-events: none; }
+    .btn-sm { padding: .4rem .9rem; font-size: .75rem; }
 
     /* ── Resultado ── */
     #resultado { margin-bottom: 2rem; }
@@ -495,12 +587,30 @@ $historial = getHistorial(10);
       font-size: .85rem;
     }
 
+    /* ── Paginación ── */
+    .pagination-controls {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      margin-top: 1rem;
+      flex-wrap: wrap;
+    }
+    .pagination-controls span {
+      color: var(--muted);
+      font-size: .78rem;
+    }
+    .csv-link {
+      margin-left: auto;
+      text-decoration: none;
+    }
+
     /* ── Responsive ── */
     @media (max-width: 600px) {
       .input-row { flex-direction: column; }
       .result-grid { grid-template-columns: 1fr 1fr; }
       thead th:nth-child(4), td:nth-child(4),
       thead th:nth-child(5), td:nth-child(5) { display: none; }
+      .csv-link { margin-left: 0; }
     }
   </style>
 </head>
@@ -561,7 +671,7 @@ $historial = getHistorial(10);
             <td><?= htmlspecialchars($row['nombre'] ?? '—') ?></td>
             <td class="mono cuit-col"><?= htmlspecialchars($row['cuit_cuil'] ?? '—') ?></td>
             <td><?= htmlspecialchars($row['localidad'] ?? '—') ?></td>
-            <td class="date-col"><?= $row['fecha'] ?></td>
+            <td class="date-col"><?= htmlspecialchars($row['fecha']) ?></td>
             <td><button class="del-btn" onclick="eliminar(<?= $row['id'] ?>)">✕</button></td>
           </tr>
           <?php endforeach; ?>
@@ -570,19 +680,42 @@ $historial = getHistorial(10);
     <?php endif; ?>
   </div>
 
+  <!-- PAGINACIÓN + CSV -->
+  <div class="pagination-controls">
+    <button id="btnPrev" onclick="cambiarPagina(-1)" class="btn btn-ghost btn-sm"
+      <?php echo $historialPages <= 1 ? 'disabled' : ''; ?>>← Anterior</button>
+    <span id="pageInfo">
+      <?php echo $historialTotal > 0
+        ? "Página 1 de $historialPages · $historialTotal registros"
+        : 'Sin registros'; ?>
+    </span>
+    <button id="btnNext" onclick="cambiarPagina(1)" class="btn btn-ghost btn-sm"
+      <?php echo $historialPages <= 1 ? 'disabled' : ''; ?>>Siguiente →</button>
+    <a id="csvLink" href="index.php?action=exportar_csv"
+       class="btn btn-ghost btn-sm csv-link"
+       style="<?php echo $historialTotal === 0 ? 'display:none' : ''; ?>">
+      ↓ Exportar CSV
+    </a>
+  </div>
+
 </div>
 
 <script>
-// ── Estado de la API ──────────────────────────────────────
+let currentPage = 1;
+const pageSize  = 10;
+
+// ── Estado de la API (con latencia) ──────────────────────────────────────
 async function checkAPI() {
   const badge = document.getElementById('apiBadge');
   badge.className = 'badge-api';
   badge.textContent = '● verificando...';
+  const t0 = Date.now();
   try {
-    const r = await fetch('http://localhost:3000/api/status');
+    const r  = await fetch('http://localhost:3000/api/status');
+    const ms = Date.now() - t0;
     if (r.ok) {
       badge.className = 'badge-api online';
-      badge.textContent = '● api online';
+      badge.textContent = `● api online · ${ms}ms`;
     } else throw new Error();
   } catch {
     badge.className = 'badge-api offline';
@@ -590,6 +723,7 @@ async function checkAPI() {
   }
 }
 checkAPI();
+setInterval(checkAPI, 30000);
 
 // ── Buscar DNI ─────────────────────────────────────────────
 async function buscar() {
@@ -608,7 +742,7 @@ async function buscar() {
     </div>`;
 
   try {
-    const res  = await fetch(`index.php?action=buscar_dni&dni=${dni}`);
+    const res  = await fetch(`index.php?action=buscar_dni&dni=${encodeURIComponent(dni)}`);
     const json = await res.json();
 
     if (json.error) {
@@ -661,7 +795,7 @@ async function buscar() {
       </div>
       <div class="saved-badge">✓ Guardado en base de datos</div>`;
 
-    recargarHistorial();
+    recargarHistorial(1);
   } catch(e) {
     box.innerHTML = `<div class="msg-box error">✕ Error de conexión. Verificá que la API Node.js esté corriendo.</div>`;
   }
@@ -680,39 +814,56 @@ async function eliminar(id) {
   await fetch(`index.php?action=eliminar&id=${id}`);
   const row = document.getElementById(`row-${id}`);
   if (row) row.style.cssText = 'opacity:0;transition:.3s';
-  setTimeout(() => { if(row) row.remove(); }, 310);
+  setTimeout(() => { recargarHistorial(currentPage); }, 320);
 }
 
-// ── Recargar historial ─────────────────────────────────────
-async function recargarHistorial() {
-  const res  = await fetch('index.php?action=historial');
-  const rows = await res.json();
-  const wrap = document.getElementById('histWrap');
+// ── Recargar historial con paginación ──────────────────────
+async function recargarHistorial(page = 1) {
+  currentPage = page;
+  try {
+    const res  = await fetch(`index.php?action=historial&page=${page}&limit=${pageSize}`);
+    const data = await res.json();
+    const { rows, total, pages } = data;
+    const wrap = document.getElementById('histWrap');
 
-  if (!rows.length) {
-    wrap.innerHTML = '<div class="empty-hist">No hay consultas registradas aún.</div>';
-    return;
+    if (!rows || !rows.length) {
+      wrap.innerHTML = '<div class="empty-hist">No hay consultas registradas aún.</div>';
+    } else {
+      let html = `<table>
+        <thead><tr>
+          <th>#</th><th>DNI</th><th>Nombre completo</th>
+          <th>CUIT / CUIL</th><th>Localidad</th><th>Fecha</th><th></th>
+        </tr></thead><tbody>`;
+      rows.forEach(r => {
+        html += `<tr id="row-${r.id}">
+          <td class="mono" style="color:var(--muted)">${r.id}</td>
+          <td class="mono">${r.dni}</td>
+          <td>${r.nombre || '—'}</td>
+          <td class="mono cuit-col">${r.cuit_cuil || '—'}</td>
+          <td>${r.localidad || '—'}</td>
+          <td class="date-col">${r.fecha}</td>
+          <td><button class="del-btn" onclick="eliminar(${r.id})">✕</button></td>
+        </tr>`;
+      });
+      wrap.innerHTML = html + '</tbody></table>';
+    }
+
+    // Actualizar paginación
+    document.getElementById('pageInfo').textContent =
+      total > 0 ? `Página ${page} de ${pages} · ${total} registros` : 'Sin registros';
+    document.getElementById('btnPrev').disabled = page <= 1;
+    document.getElementById('btnNext').disabled = page >= pages;
+
+    // Mostrar/ocultar CSV
+    const csvLink = document.getElementById('csvLink');
+    csvLink.style.display = total > 0 ? '' : 'none';
+  } catch(e) {
+    console.error('Error al cargar historial:', e);
   }
+}
 
-  let html = `<table>
-    <thead><tr>
-      <th>#</th><th>DNI</th><th>Nombre completo</th>
-      <th>CUIT / CUIL</th><th>Localidad</th><th>Fecha</th><th></th>
-    </tr></thead><tbody>`;
-
-  rows.forEach(r => {
-    html += `<tr id="row-${r.id}">
-      <td class="mono" style="color:var(--muted)">${r.id}</td>
-      <td class="mono">${r.dni}</td>
-      <td>${r.nombre || '—'}</td>
-      <td class="mono cuit-col">${r.cuit_cuil || '—'}</td>
-      <td>${r.localidad || '—'}</td>
-      <td class="date-col">${r.fecha}</td>
-      <td><button class="del-btn" onclick="eliminar(${r.id})">✕</button></td>
-    </tr>`;
-  });
-
-  wrap.innerHTML = html + '</tbody></table>';
+function cambiarPagina(dir) {
+  recargarHistorial(currentPage + dir);
 }
 </script>
 </body>
