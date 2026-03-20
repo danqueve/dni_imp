@@ -1,6 +1,6 @@
 <?php
 // ============================================================
-// Variables de entorno desde .env
+// Configuración de API
 // ============================================================
 function loadEnv($file = null) {
     $file = $file ?? __DIR__ . '/.env';
@@ -13,21 +13,8 @@ function loadEnv($file = null) {
 }
 loadEnv();
 
-define('DB_HOST', $_ENV['DB_HOST'] ?? 'localhost');
-define('DB_USER', $_ENV['DB_USER'] ?? 'root');
-define('DB_PASS', $_ENV['DB_PASS'] ?? '');
-define('DB_NAME', $_ENV['DB_NAME'] ?? 'consultas_dni');
-define('API_URL',  $_ENV['API_URL']  ?? 'http://localhost:3000');
-
-// ============================================================
-// Conexión a MySQL
-// ============================================================
-function getDB() {
-    $conn = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-    if ($conn->connect_error) return null;
-    $conn->set_charset('utf8mb4');
-    return $conn;
-}
+define('API_URL',    $_ENV['API_URL']    ?? 'http://localhost:3000');
+define('API_JS_URL', $_ENV['API_JS_URL'] ?? 'http://localhost:3000');
 
 // ============================================================
 // Llamada a la API de Node.js
@@ -49,97 +36,11 @@ function consultarAPI($endpoint) {
 }
 
 // ============================================================
-// Guardar o actualizar en base de datos (evita duplicados)
-// ============================================================
-function guardarPersona($data) {
-    $db = getDB();
-    if (!$db) return false;
-    $ip = $_SERVER['REMOTE_ADDR'] ?? 'localhost';
-
-    $check = $db->prepare("SELECT id FROM personas WHERE dni = ?");
-    $check->bind_param('s', $data['dni']);
-    $check->execute();
-    $check->store_result();
-    $existe = $check->num_rows > 0;
-    $check->close();
-
-    if ($existe) {
-        $stmt = $db->prepare("
-            UPDATE personas
-            SET nombre=?, cuit_cuil=?, tipo_persona=?, genero=?, nacionalidad=?,
-                localidad=?, empleador=?, ip_consulta=?, fecha_consulta=NOW()
-            WHERE dni=?
-        ");
-        $stmt->bind_param('sssssssss',
-            $data['name']        ?? null,
-            $data['cuit']        ?? null,
-            $data['personType']  ?? null,
-            $data['gender']      ?? null,
-            $data['nationality'] ?? null,
-            $data['locality']    ?? null,
-            $data['employer']    ?? null,
-            $ip,
-            $data['dni']
-        );
-    } else {
-        $stmt = $db->prepare("
-            INSERT INTO personas (dni, nombre, cuit_cuil, tipo_persona, genero, nacionalidad, localidad, empleador, ip_consulta)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ");
-        $stmt->bind_param('sssssssss',
-            $data['dni'],
-            $data['name']        ?? null,
-            $data['cuit']        ?? null,
-            $data['personType']  ?? null,
-            $data['gender']      ?? null,
-            $data['nationality'] ?? null,
-            $data['locality']    ?? null,
-            $data['employer']    ?? null,
-            $ip
-        );
-    }
-
-    $ok = $stmt->execute();
-    $stmt->close();
-    $db->close();
-    return $ok;
-}
-
-// ============================================================
-// Obtener historial con paginación (prepared statement)
-// ============================================================
-function getHistorial($limit = 10, $offset = 0) {
-    $db = getDB();
-    if (!$db) return [];
-    $stmt = $db->prepare("
-        SELECT id, dni, nombre, cuit_cuil, tipo_persona, localidad,
-               DATE_FORMAT(fecha_consulta, '%d/%m/%Y %H:%i') AS fecha
-        FROM personas
-        ORDER BY fecha_consulta DESC
-        LIMIT ? OFFSET ?
-    ");
-    $stmt->bind_param('ii', $limit, $offset);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $rows   = $result ? $result->fetch_all(MYSQLI_ASSOC) : [];
-    $stmt->close();
-    $db->close();
-    return $rows;
-}
-
-function getHistorialCount() {
-    $db = getDB();
-    if (!$db) return 0;
-    $result = $db->query("SELECT COUNT(*) AS total FROM personas");
-    $row    = $result ? $result->fetch_assoc() : ['total' => 0];
-    $db->close();
-    return (int) $row['total'];
-}
-
-// ============================================================
 // Procesar petición AJAX
 // ============================================================
 if (isset($_GET['action'])) {
+    ini_set('display_errors', 0);
+    error_reporting(0);
     header('Content-Type: application/json');
 
     if ($_GET['action'] === 'buscar_dni' && isset($_GET['dni'])) {
@@ -148,95 +49,34 @@ if (isset($_GET['action'])) {
             echo json_encode(['error' => 'El DNI debe tener 7 u 8 dígitos.']);
             exit;
         }
-        $resultado = consultarAPI('/api/dni/' . $dni);
-        if (isset($resultado['success']) && $resultado['success']) {
-            $persona        = $resultado['data'];
-            $persona['dni'] = $dni;
-            guardarPersona($persona);
-            echo json_encode(['success' => true, 'data' => $persona]);
-        } else {
-            echo json_encode($resultado);
-        }
-        exit;
-    }
-
-    if ($_GET['action'] === 'historial') {
-        $limit  = max(1, min(100, intval($_GET['limit'] ?? 10)));
-        $page   = max(1, intval($_GET['page'] ?? 1));
-        $offset = ($page - 1) * $limit;
-        $total  = getHistorialCount();
-        $rows   = getHistorial($limit, $offset);
-        echo json_encode([
-            'rows'  => $rows,
-            'total' => $total,
-            'page'  => $page,
-            'pages' => (int) ceil($total / max(1, $limit)),
-        ]);
-        exit;
-    }
-
-    if ($_GET['action'] === 'eliminar' && isset($_GET['id'])) {
-        $db = getDB();
-        if (!$db) { echo json_encode(['error' => 'Sin conexión a BD']); exit; }
-        $id   = intval($_GET['id']);
-        $stmt = $db->prepare("DELETE FROM personas WHERE id = ?");
-        $stmt->bind_param('i', $id);
-        $ok   = $stmt->execute();
-        $stmt->close();
-        $db->close();
-        echo json_encode(['ok' => $ok]);
-        exit;
-    }
-
-    if ($_GET['action'] === 'exportar_csv') {
-        $db = getDB();
-        if (!$db) { http_response_code(500); echo 'Sin conexión a BD'; exit; }
-        header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename="historial_' . date('Ymd_His') . '.csv"');
-        $out = fopen('php://output', 'w');
-        fputs($out, "\xEF\xBB\xBF"); // BOM UTF-8 para Excel
-        fputcsv($out, ['ID', 'DNI', 'Nombre', 'CUIT/CUIL', 'Tipo', 'Género', 'Nacionalidad', 'Localidad', 'Empleador', 'IP', 'Fecha']);
-        $result = $db->query("
-            SELECT id, dni, nombre, cuit_cuil, tipo_persona, genero, nacionalidad,
-                   localidad, empleador, ip_consulta,
-                   DATE_FORMAT(fecha_consulta, '%d/%m/%Y %H:%i') AS fecha
-            FROM personas ORDER BY fecha_consulta DESC
-        ");
-        if ($result) {
-            while ($row = $result->fetch_assoc()) fputcsv($out, $row);
-        }
-        fclose($out);
-        $db->close();
+        echo json_encode(consultarAPI('/api/dni/' . $dni));
         exit;
     }
 
     echo json_encode(['error' => 'Acción no válida']);
     exit;
 }
-
-$historial      = getHistorial(10, 0);
-$historialTotal = getHistorialCount();
-$historialPages = (int) ceil($historialTotal / 10);
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Consulta DNI · Argentina</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>DNI Imperio</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg:        #0a0c10;
-      --surface:   #111318;
-      --border:    #1e2230;
-      --accent:    #4f7cff;
-      --accent2:   #00e5b0;
-      --danger:    #ff4f6a;
-      --text:      #e8eaf0;
-      --muted:     #5a6080;
-      --card:      #13161f;
+      --bg:       #f0f4ff;
+      --surface:  #ffffff;
+      --border:   #dde4f5;
+      --accent:   #4361ee;
+      --accent2:  #06d6a0;
+      --danger:   #ef476f;
+      --text:     #1e2040;
+      --muted:    #7b84b4;
+      --shadow:   0 2px 12px rgba(67,97,238,.10);
+      --shadow-lg: 0 8px 32px rgba(67,97,238,.14);
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -244,19 +84,19 @@ $historialPages = (int) ceil($historialTotal / 10);
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'DM Mono', monospace;
-      min-height: 100vh;
-      overflow-x: hidden;
+      font-family: 'Inter', sans-serif;
+      min-height: 100dvh;
+      -webkit-font-smoothing: antialiased;
     }
 
-    /* ── Fondo animado ── */
+    /* ── Fondo decorativo ── */
     body::before {
       content: '';
       position: fixed;
       inset: 0;
       background:
-        radial-gradient(ellipse 60% 40% at 20% 10%, rgba(79,124,255,.12) 0%, transparent 60%),
-        radial-gradient(ellipse 40% 30% at 80% 80%, rgba(0,229,176,.08) 0%, transparent 50%);
+        radial-gradient(ellipse 70% 50% at 10% -10%, rgba(67,97,238,.09) 0%, transparent 60%),
+        radial-gradient(ellipse 50% 40% at 90% 100%, rgba(6,214,160,.08) 0%, transparent 55%);
       pointer-events: none;
       z-index: 0;
     }
@@ -264,232 +104,282 @@ $historialPages = (int) ceil($historialTotal / 10);
     .wrapper {
       position: relative;
       z-index: 1;
-      max-width: 860px;
+      max-width: 520px;
       margin: 0 auto;
-      padding: 2.5rem 1.5rem 4rem;
+      padding: 1.5rem 1rem 5rem;
+      min-height: 100dvh;
     }
 
     /* ── Header ── */
     header {
       display: flex;
       align-items: center;
-      gap: 1rem;
-      margin-bottom: 2.8rem;
-      padding-bottom: 1.5rem;
-      border-bottom: 1px solid var(--border);
+      gap: .9rem;
+      margin-bottom: 2rem;
+      padding: 1.1rem 1.2rem;
+      background: var(--surface);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      border: 1px solid var(--border);
     }
     .logo {
-      width: 42px; height: 42px;
-      background: linear-gradient(135deg, var(--accent), var(--accent2));
-      border-radius: 10px;
+      width: 46px; height: 46px;
+      background: linear-gradient(135deg, var(--accent), #7b5ea7);
+      border-radius: 13px;
       display: grid; place-items: center;
-      font-family: 'Syne', sans-serif;
+      font-family: 'Inter', sans-serif;
       font-weight: 800;
-      font-size: 1.1rem;
+      font-size: .9rem;
+      color: #fff;
+      letter-spacing: -.02em;
       flex-shrink: 0;
+      box-shadow: 0 4px 12px rgba(67,97,238,.35);
     }
-    header h1 {
-      font-family: 'Syne', sans-serif;
-      font-size: 1.4rem;
-      font-weight: 700;
-      letter-spacing: -.01em;
+    .brand h1 {
+      font-size: 1.15rem;
+      font-weight: 800;
+      letter-spacing: -.03em;
+      background: linear-gradient(90deg, var(--accent), #7b5ea7);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      line-height: 1.2;
     }
-    header span {
-      font-size: .75rem;
+    .brand p {
+      font-size: .7rem;
       color: var(--muted);
-      display: block;
-      margin-top: 2px;
+      margin-top: 1px;
+      font-weight: 500;
+      letter-spacing: .02em;
     }
     .badge-api {
       margin-left: auto;
-      padding: .3rem .75rem;
-      border-radius: 999px;
-      font-size: .68rem;
-      letter-spacing: .06em;
-      text-transform: uppercase;
-      border: 1px solid var(--border);
-      color: var(--muted);
-      cursor: pointer;
-      transition: all .2s;
-    }
-    .badge-api.online  { border-color: var(--accent2); color: var(--accent2); }
-    .badge-api.offline { border-color: var(--danger);  color: var(--danger);  }
-
-    /* ── Search box ── */
-    .search-section {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 2rem;
-      margin-bottom: 2rem;
-    }
-    .search-section h2 {
-      font-family: 'Syne', sans-serif;
-      font-size: 1rem;
-      font-weight: 600;
-      margin-bottom: 1.2rem;
-      color: var(--text);
-    }
-    .input-row {
-      display: flex;
-      gap: .75rem;
-      flex-wrap: wrap;
-    }
-    .input-wrap {
-      position: relative;
-      flex: 1;
-      min-width: 200px;
-    }
-    .input-wrap label {
-      position: absolute;
-      top: -9px; left: 12px;
-      font-size: .65rem;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      color: var(--accent);
-      background: var(--card);
-      padding: 0 4px;
-    }
-    input[type="text"] {
-      width: 100%;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      color: var(--text);
-      font-family: 'DM Mono', monospace;
-      font-size: 1.1rem;
-      padding: .75rem 1rem;
-      outline: none;
-      transition: border-color .2s, box-shadow .2s;
-      letter-spacing: .05em;
-    }
-    input[type="text"]:focus {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(79,124,255,.15);
-    }
-    input[type="text"]::placeholder { color: var(--muted); font-size: .9rem; }
-
-    .btn {
-      padding: .75rem 1.6rem;
-      border: none;
-      border-radius: 10px;
-      font-family: 'Syne', sans-serif;
-      font-size: .9rem;
-      font-weight: 700;
-      cursor: pointer;
-      transition: all .2s;
-      letter-spacing: .02em;
-      white-space: nowrap;
-    }
-    .btn-primary {
-      background: var(--accent);
-      color: #fff;
-    }
-    .btn-primary:hover { background: #3d6bf0; transform: translateY(-1px); }
-    .btn-primary:active { transform: translateY(0); }
-    .btn-ghost {
-      background: transparent;
-      color: var(--muted);
-      border: 1px solid var(--border);
-    }
-    .btn-ghost:hover { color: var(--text); border-color: var(--muted); }
-    .btn-ghost:disabled { opacity: .35; cursor: not-allowed; pointer-events: none; }
-    .btn-sm { padding: .4rem .9rem; font-size: .75rem; }
-
-    /* ── Resultado ── */
-    #resultado { margin-bottom: 2rem; }
-
-    .result-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      overflow: hidden;
-      animation: slideIn .35s ease;
-    }
-    @keyframes slideIn {
-      from { opacity: 0; transform: translateY(12px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-    .result-header {
-      padding: 1.2rem 1.5rem;
-      background: linear-gradient(90deg, rgba(79,124,255,.12), transparent);
-      border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
-      gap: .75rem;
-    }
-    .result-header .dot {
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      background: var(--accent2);
-      box-shadow: 0 0 8px var(--accent2);
-      flex-shrink: 0;
-    }
-    .result-header h3 {
-      font-family: 'Syne', sans-serif;
-      font-size: 1.1rem;
-      font-weight: 700;
-    }
-    .result-header .tag {
-      margin-left: auto;
-      font-size: .68rem;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      padding: .25rem .65rem;
+      gap: .35rem;
+      padding: .35rem .75rem;
       border-radius: 999px;
-      background: rgba(0,229,176,.1);
-      color: var(--accent2);
-      border: 1px solid rgba(0,229,176,.2);
+      font-size: .65rem;
+      font-weight: 600;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+      border: 1.5px solid var(--border);
+      color: var(--muted);
+      background: var(--bg);
+      cursor: pointer;
+      transition: all .2s;
+      white-space: nowrap;
     }
-    .result-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 0;
+    .badge-api .dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+      transition: background .2s;
     }
-    .result-field {
-      padding: 1rem 1.5rem;
-      border-right: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
+    .badge-api.online  { border-color: #b8f0de; color: #0e9a6e; background: #f0fdf9; }
+    .badge-api.online .dot  { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+    .badge-api.offline { border-color: #fdd0d8; color: #c4334f; background: #fff5f7; }
+    .badge-api.offline .dot { background: var(--danger); }
+
+    /* ── Card de búsqueda ── */
+    .search-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 1.5rem;
+      box-shadow: var(--shadow);
+      margin-bottom: 1.25rem;
     }
-    .result-field:last-child { border-right: none; }
-    .result-field .lbl {
-      font-size: .62rem;
+    .search-card h2 {
+      font-size: .72rem;
+      font-weight: 700;
       letter-spacing: .1em;
       text-transform: uppercase;
       color: var(--muted);
-      margin-bottom: .3rem;
-    }
-    .result-field .val {
-      font-size: .95rem;
-      color: var(--text);
-      word-break: break-word;
-    }
-    .result-field .val.highlight {
-      color: var(--accent2);
-      font-weight: 500;
-      font-size: 1rem;
-    }
-    .result-field .val.cuit {
-      color: var(--accent);
-      font-size: 1.05rem;
-      letter-spacing: .05em;
+      margin-bottom: 1rem;
     }
 
-    /* ── Error / loading ── */
-    .msg-box {
-      padding: 1rem 1.5rem;
-      border-radius: 12px;
+    .input-group {
+      position: relative;
+      margin-bottom: .85rem;
+    }
+    .input-group .icon {
+      position: absolute;
+      left: 1rem;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 1.1rem;
+      pointer-events: none;
+    }
+    input[type="text"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1.5px solid var(--border);
+      border-radius: 13px;
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.25rem;
+      font-weight: 500;
+      padding: .9rem 1rem .9rem 2.9rem;
+      outline: none;
+      transition: border-color .2s, box-shadow .2s;
+      letter-spacing: .08em;
+      -webkit-appearance: none;
+    }
+    input[type="text"]:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 4px rgba(67,97,238,.12);
+      background: #fff;
+    }
+    input[type="text"]::placeholder {
+      color: var(--muted);
+      font-size: .95rem;
+      letter-spacing: .03em;
+      font-weight: 400;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: .6rem;
+    }
+    .btn {
+      flex: 1;
+      padding: .88rem 1rem;
+      border: none;
+      border-radius: 13px;
+      font-family: 'Inter', sans-serif;
+      font-size: .95rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all .18s;
+      min-height: 48px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #7b5ea7);
+      color: #fff;
+      box-shadow: 0 4px 14px rgba(67,97,238,.35);
+      flex: 2;
+    }
+    .btn-primary:hover  { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(67,97,238,.4); }
+    .btn-primary:active { transform: translateY(0); box-shadow: none; }
+    .btn-ghost {
+      background: var(--bg);
+      color: var(--muted);
+      border: 1.5px solid var(--border);
+      flex: 1;
+    }
+    .btn-ghost:hover { color: var(--text); border-color: #b0b8d8; }
+    .btn-ghost:active { background: var(--border); }
+
+    /* ── Resultado ── */
+    #resultado { margin-bottom: 1rem; }
+
+    .result-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: var(--shadow-lg);
+      animation: slideUp .3s cubic-bezier(.16,1,.3,1);
+    }
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .result-hero {
+      padding: 1.4rem 1.4rem 1rem;
+      background: linear-gradient(135deg, rgba(67,97,238,.07), rgba(123,94,167,.05));
+      border-bottom: 1px solid var(--border);
+    }
+    .result-hero .name-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: .4rem;
+      font-size: .65rem;
+      font-weight: 700;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--accent2);
+      background: rgba(6,214,160,.1);
+      border: 1px solid rgba(6,214,160,.25);
+      padding: .25rem .7rem;
+      border-radius: 999px;
+      margin-bottom: .6rem;
+    }
+    .result-hero h3 {
+      font-size: 1.35rem;
+      font-weight: 800;
+      letter-spacing: -.02em;
+      color: var(--text);
+      line-height: 1.2;
+    }
+    .result-hero .cuit-display {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1rem;
+      font-weight: 500;
+      color: var(--accent);
+      margin-top: .3rem;
+      letter-spacing: .06em;
+    }
+
+    .result-fields {
+      padding: .5rem 0;
+    }
+    .field-row {
+      display: flex;
+      align-items: center;
+      padding: .75rem 1.4rem;
+      border-bottom: 1px solid var(--border);
+      gap: .75rem;
+    }
+    .field-row:last-child { border-bottom: none; }
+    .field-icon {
+      font-size: 1.1rem;
+      width: 28px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .field-info { flex: 1; min-width: 0; }
+    .field-label {
+      font-size: .62rem;
+      font-weight: 700;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: .15rem;
+    }
+    .field-value {
       font-size: .9rem;
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .field-value.mono {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .85rem;
+    }
+
+    /* ── Mensajes ── */
+    .msg-box {
+      padding: 1rem 1.2rem;
+      border-radius: 14px;
+      font-size: .88rem;
+      font-weight: 500;
       display: flex;
       align-items: center;
       gap: .75rem;
-      animation: slideIn .3s ease;
+      animation: slideUp .25s ease;
     }
-    .msg-box.error   { background: rgba(255,79,106,.1);  border: 1px solid rgba(255,79,106,.3);  color: #ff8fa0; }
-    .msg-box.loading { background: rgba(79,124,255,.1);  border: 1px solid rgba(79,124,255,.3);  color: var(--accent); }
+    .msg-box.error   { background: #fff5f7; border: 1.5px solid #fdd0d8; color: #c4334f; }
+    .msg-box.loading { background: #f0f4ff; border: 1.5px solid #c7d2fc; color: var(--accent); }
     .spinner {
       width: 18px; height: 18px;
-      border: 2px solid rgba(79,124,255,.3);
+      border: 2.5px solid rgba(67,97,238,.2);
       border-top-color: var(--accent);
       border-radius: 50%;
       animation: spin .7s linear infinite;
@@ -497,120 +387,11 @@ $historialPages = (int) ceil($historialTotal / 10);
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* ── Guardado badge ── */
-    .saved-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: .4rem;
-      padding: .4rem 1rem;
-      border-radius: 999px;
-      background: rgba(0,229,176,.1);
-      border: 1px solid rgba(0,229,176,.25);
-      color: var(--accent2);
-      font-size: .72rem;
-      letter-spacing: .06em;
-      text-transform: uppercase;
-      margin-top: .75rem;
-    }
-
-    /* ── Historial ── */
-    .section-title {
-      font-family: 'Syne', sans-serif;
-      font-size: .85rem;
-      font-weight: 700;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 1rem;
-      display: flex;
-      align-items: center;
-      gap: .5rem;
-    }
-    .section-title::after {
-      content: '';
-      flex: 1;
-      height: 1px;
-      background: var(--border);
-    }
-
-    .hist-table-wrap {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      overflow: hidden;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: .82rem;
-    }
-    thead th {
-      padding: .75rem 1rem;
-      text-align: left;
-      font-size: .65rem;
-      letter-spacing: .1em;
-      text-transform: uppercase;
-      color: var(--muted);
-      border-bottom: 1px solid var(--border);
-      white-space: nowrap;
-    }
-    tbody tr {
-      transition: background .15s;
-      border-bottom: 1px solid var(--border);
-    }
-    tbody tr:last-child { border-bottom: none; }
-    tbody tr:hover { background: rgba(255,255,255,.03); }
-    td {
-      padding: .7rem 1rem;
-      color: var(--text);
-      vertical-align: middle;
-    }
-    td.mono { font-family: 'DM Mono', monospace; letter-spacing: .04em; }
-    td.cuit-col { color: var(--accent); }
-    td.date-col { color: var(--muted); font-size: .75rem; }
-    .del-btn {
-      background: none;
-      border: 1px solid transparent;
-      color: var(--muted);
-      cursor: pointer;
-      border-radius: 6px;
-      padding: .2rem .5rem;
-      font-size: .8rem;
-      transition: all .15s;
-    }
-    .del-btn:hover { color: var(--danger); border-color: var(--danger); }
-
-    .empty-hist {
-      padding: 2.5rem;
-      text-align: center;
-      color: var(--muted);
-      font-size: .85rem;
-    }
-
-    /* ── Paginación ── */
-    .pagination-controls {
-      display: flex;
-      align-items: center;
-      gap: .75rem;
-      margin-top: 1rem;
-      flex-wrap: wrap;
-    }
-    .pagination-controls span {
-      color: var(--muted);
-      font-size: .78rem;
-    }
-    .csv-link {
-      margin-left: auto;
-      text-decoration: none;
-    }
-
     /* ── Responsive ── */
-    @media (max-width: 600px) {
-      .input-row { flex-direction: column; }
-      .result-grid { grid-template-columns: 1fr 1fr; }
-      thead th:nth-child(4), td:nth-child(4),
-      thead th:nth-child(5), td:nth-child(5) { display: none; }
-      .csv-link { margin-left: 0; }
+    @media (max-width: 400px) {
+      .wrapper { padding: 1rem .75rem 4rem; }
+      .result-hero h3 { font-size: 1.15rem; }
+      header { padding: .9rem 1rem; }
     }
   </style>
 </head>
@@ -618,25 +399,29 @@ $historialPages = (int) ceil($historialTotal / 10);
 <div class="wrapper">
 
   <header>
-    <div class="logo">AR</div>
-    <div>
-      <h1>Consulta por DNI</h1>
-      <span>cuitonline.com · AFIP · Base local</span>
+    <div class="logo">DI</div>
+    <div class="brand">
+      <h1>DNI Imperio</h1>
+      <p>AFIP · cuitonline.com · Argentina</p>
     </div>
-    <span class="badge-api" id="apiBadge" onclick="checkAPI()">● verificando api</span>
+    <span class="badge-api" id="apiBadge" onclick="checkAPI()">
+      <span class="dot"></span>
+      <span id="badgeText">verificando</span>
+    </span>
   </header>
 
   <!-- BÚSQUEDA -->
-  <div class="search-section">
+  <div class="search-card">
     <h2>Buscar persona</h2>
-    <div class="input-row">
-      <div class="input-wrap">
-        <label for="dniInput">DNI</label>
-        <input type="text" id="dniInput" maxlength="8"
-               placeholder="Ej: 28401234"
-               oninput="this.value=this.value.replace(/\D/,'')"
-               onkeydown="if(event.key==='Enter') buscar()">
-      </div>
+    <div class="input-group">
+      <span class="icon">🪪</span>
+      <input type="text" id="dniInput" maxlength="8"
+             inputmode="numeric" pattern="\d*"
+             placeholder="Número de DNI"
+             oninput="this.value=this.value.replace(/\D/g,'')"
+             onkeydown="if(event.key==='Enter') buscar()">
+    </div>
+    <div class="btn-row">
       <button class="btn btn-primary" onclick="buscar()">Consultar</button>
       <button class="btn btn-ghost" onclick="limpiar()">Limpiar</button>
     </div>
@@ -645,100 +430,45 @@ $historialPages = (int) ceil($historialTotal / 10);
   <!-- RESULTADO -->
   <div id="resultado"></div>
 
-  <!-- HISTORIAL -->
-  <p class="section-title">Historial de consultas</p>
-  <div class="hist-table-wrap" id="histWrap">
-    <?php if (empty($historial)): ?>
-      <div class="empty-hist">No hay consultas registradas aún.</div>
-    <?php else: ?>
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>DNI</th>
-            <th>Nombre completo</th>
-            <th>CUIT / CUIL</th>
-            <th>Localidad</th>
-            <th>Fecha</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="histBody">
-          <?php foreach ($historial as $row): ?>
-          <tr id="row-<?= $row['id'] ?>">
-            <td class="mono" style="color:var(--muted)"><?= $row['id'] ?></td>
-            <td class="mono"><?= htmlspecialchars($row['dni']) ?></td>
-            <td><?= htmlspecialchars($row['nombre'] ?? '—') ?></td>
-            <td class="mono cuit-col"><?= htmlspecialchars($row['cuit_cuil'] ?? '—') ?></td>
-            <td><?= htmlspecialchars($row['localidad'] ?? '—') ?></td>
-            <td class="date-col"><?= htmlspecialchars($row['fecha']) ?></td>
-            <td><button class="del-btn" onclick="eliminar(<?= $row['id'] ?>)">✕</button></td>
-          </tr>
-          <?php endforeach; ?>
-        </tbody>
-      </table>
-    <?php endif; ?>
-  </div>
-
-  <!-- PAGINACIÓN + CSV -->
-  <div class="pagination-controls">
-    <button id="btnPrev" onclick="cambiarPagina(-1)" class="btn btn-ghost btn-sm"
-      <?php echo $historialPages <= 1 ? 'disabled' : ''; ?>>← Anterior</button>
-    <span id="pageInfo">
-      <?php echo $historialTotal > 0
-        ? "Página 1 de $historialPages · $historialTotal registros"
-        : 'Sin registros'; ?>
-    </span>
-    <button id="btnNext" onclick="cambiarPagina(1)" class="btn btn-ghost btn-sm"
-      <?php echo $historialPages <= 1 ? 'disabled' : ''; ?>>Siguiente →</button>
-    <a id="csvLink" href="index.php?action=exportar_csv"
-       class="btn btn-ghost btn-sm csv-link"
-       style="<?php echo $historialTotal === 0 ? 'display:none' : ''; ?>">
-      ↓ Exportar CSV
-    </a>
-  </div>
-
 </div>
 
 <script>
-let currentPage = 1;
-const pageSize  = 10;
+const API_BASE = '<?= htmlspecialchars(rtrim(API_JS_URL, '/')) ?>';
 
-// ── Estado de la API (con latencia) ──────────────────────────────────────
 async function checkAPI() {
   const badge = document.getElementById('apiBadge');
+  const text  = document.getElementById('badgeText');
   badge.className = 'badge-api';
-  badge.textContent = '● verificando...';
+  text.textContent = 'verificando';
   const t0 = Date.now();
   try {
-    const r  = await fetch('http://localhost:3000/api/status');
+    const r  = await fetch(`${API_BASE}/api/status`);
     const ms = Date.now() - t0;
     if (r.ok) {
       badge.className = 'badge-api online';
-      badge.textContent = `● api online · ${ms}ms`;
+      text.textContent = `online · ${ms}ms`;
     } else throw new Error();
   } catch {
     badge.className = 'badge-api offline';
-    badge.textContent = '● api offline';
+    text.textContent = 'offline';
   }
 }
 checkAPI();
 setInterval(checkAPI, 30000);
 
-// ── Buscar DNI ─────────────────────────────────────────────
 async function buscar() {
   const dni = document.getElementById('dniInput').value.trim();
   const box  = document.getElementById('resultado');
 
   if (!dni || dni.length < 7) {
-    box.innerHTML = `<div class="msg-box error">⚠ Ingresá un DNI válido (7 u 8 dígitos).</div>`;
+    box.innerHTML = `<div class="msg-box error">⚠️ Ingresá un DNI válido (7 u 8 dígitos).</div>`;
     return;
   }
 
   box.innerHTML = `
     <div class="msg-box loading">
       <div class="spinner"></div>
-      Consultando DNI ${dni} en cuitonline.com…
+      Consultando DNI ${dni}…
     </div>`;
 
   try {
@@ -746,124 +476,79 @@ async function buscar() {
     const json = await res.json();
 
     if (json.error) {
-      box.innerHTML = `<div class="msg-box error">✕ ${json.error}</div>`;
+      box.innerHTML = `<div class="msg-box error">❌ ${json.error}</div>`;
       return;
     }
 
     const d = json.data;
     box.innerHTML = `
       <div class="result-card">
-        <div class="result-header">
-          <div class="dot"></div>
+        <div class="result-hero">
+          <div class="name-tag">✓ Encontrado</div>
           <h3>${d.name || 'Sin nombre'}</h3>
-          <span class="tag">${d.personType || 'Persona'}</span>
+          <div class="cuit-display">${d.cuit || '—'}</div>
         </div>
-        <div class="result-grid">
-          <div class="result-field">
-            <div class="lbl">Nombre completo</div>
-            <div class="val highlight">${d.name || '—'}</div>
+        <div class="result-fields">
+          <div class="field-row">
+            <div class="field-icon">🪪</div>
+            <div class="field-info">
+              <div class="field-label">DNI</div>
+              <div class="field-value mono">${dni}</div>
+            </div>
           </div>
-          <div class="result-field">
-            <div class="lbl">DNI</div>
-            <div class="val mono">${dni}</div>
+          <div class="field-row">
+            <div class="field-icon">🏷️</div>
+            <div class="field-info">
+              <div class="field-label">CUIT / CUIL</div>
+              <div class="field-value mono">${d.cuit || '—'}</div>
+            </div>
           </div>
-          <div class="result-field">
-            <div class="lbl">CUIT / CUIL</div>
-            <div class="val cuit">${d.cuit || '—'}</div>
+          <div class="field-row">
+            <div class="field-icon">👤</div>
+            <div class="field-info">
+              <div class="field-label">Tipo de persona</div>
+              <div class="field-value">${d.personType || '—'}</div>
+            </div>
           </div>
-          <div class="result-field">
-            <div class="lbl">Tipo</div>
-            <div class="val">${d.personType || '—'}</div>
+          <div class="field-row">
+            <div class="field-icon">⚥</div>
+            <div class="field-info">
+              <div class="field-label">Género</div>
+              <div class="field-value">${d.gender || '—'}</div>
+            </div>
           </div>
-          <div class="result-field">
-            <div class="lbl">Género</div>
-            <div class="val">${d.gender || '—'}</div>
+          <div class="field-row">
+            <div class="field-icon">🌍</div>
+            <div class="field-info">
+              <div class="field-label">Nacionalidad</div>
+              <div class="field-value">${d.nationality || '—'}</div>
+            </div>
           </div>
-          <div class="result-field">
-            <div class="lbl">Nacionalidad</div>
-            <div class="val">${d.nationality || '—'}</div>
+          <div class="field-row">
+            <div class="field-icon">📍</div>
+            <div class="field-info">
+              <div class="field-label">Localidad</div>
+              <div class="field-value">${d.locality || '—'}</div>
+            </div>
           </div>
-          <div class="result-field">
-            <div class="lbl">Localidad</div>
-            <div class="val">${d.locality || '—'}</div>
-          </div>
-          <div class="result-field">
-            <div class="lbl">Empleador</div>
-            <div class="val">${d.employer || '—'}</div>
+          <div class="field-row">
+            <div class="field-icon">🏢</div>
+            <div class="field-info">
+              <div class="field-label">Empleador</div>
+              <div class="field-value">${d.employer || '—'}</div>
+            </div>
           </div>
         </div>
-      </div>
-      <div class="saved-badge">✓ Guardado en base de datos</div>`;
-
-    recargarHistorial(1);
+      </div>`;
   } catch(e) {
-    box.innerHTML = `<div class="msg-box error">✕ Error de conexión. Verificá que la API Node.js esté corriendo.</div>`;
+    box.innerHTML = `<div class="msg-box error">❌ Error de conexión. Verificá que la API esté corriendo.</div>`;
   }
 }
 
-// ── Limpiar ────────────────────────────────────────────────
 function limpiar() {
   document.getElementById('dniInput').value = '';
   document.getElementById('resultado').innerHTML = '';
   document.getElementById('dniInput').focus();
-}
-
-// ── Eliminar del historial ─────────────────────────────────
-async function eliminar(id) {
-  if (!confirm('¿Eliminar este registro?')) return;
-  await fetch(`index.php?action=eliminar&id=${id}`);
-  const row = document.getElementById(`row-${id}`);
-  if (row) row.style.cssText = 'opacity:0;transition:.3s';
-  setTimeout(() => { recargarHistorial(currentPage); }, 320);
-}
-
-// ── Recargar historial con paginación ──────────────────────
-async function recargarHistorial(page = 1) {
-  currentPage = page;
-  try {
-    const res  = await fetch(`index.php?action=historial&page=${page}&limit=${pageSize}`);
-    const data = await res.json();
-    const { rows, total, pages } = data;
-    const wrap = document.getElementById('histWrap');
-
-    if (!rows || !rows.length) {
-      wrap.innerHTML = '<div class="empty-hist">No hay consultas registradas aún.</div>';
-    } else {
-      let html = `<table>
-        <thead><tr>
-          <th>#</th><th>DNI</th><th>Nombre completo</th>
-          <th>CUIT / CUIL</th><th>Localidad</th><th>Fecha</th><th></th>
-        </tr></thead><tbody>`;
-      rows.forEach(r => {
-        html += `<tr id="row-${r.id}">
-          <td class="mono" style="color:var(--muted)">${r.id}</td>
-          <td class="mono">${r.dni}</td>
-          <td>${r.nombre || '—'}</td>
-          <td class="mono cuit-col">${r.cuit_cuil || '—'}</td>
-          <td>${r.localidad || '—'}</td>
-          <td class="date-col">${r.fecha}</td>
-          <td><button class="del-btn" onclick="eliminar(${r.id})">✕</button></td>
-        </tr>`;
-      });
-      wrap.innerHTML = html + '</tbody></table>';
-    }
-
-    // Actualizar paginación
-    document.getElementById('pageInfo').textContent =
-      total > 0 ? `Página ${page} de ${pages} · ${total} registros` : 'Sin registros';
-    document.getElementById('btnPrev').disabled = page <= 1;
-    document.getElementById('btnNext').disabled = page >= pages;
-
-    // Mostrar/ocultar CSV
-    const csvLink = document.getElementById('csvLink');
-    csvLink.style.display = total > 0 ? '' : 'none';
-  } catch(e) {
-    console.error('Error al cargar historial:', e);
-  }
-}
-
-function cambiarPagina(dir) {
-  recargarHistorial(currentPage + dir);
 }
 </script>
 </body>
