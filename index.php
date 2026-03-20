@@ -13,8 +13,7 @@ function loadEnv($file = null) {
 }
 loadEnv();
 
-define('API_URL',    $_ENV['API_URL']    ?? 'http://localhost:3000');
-define('API_JS_URL', $_ENV['API_JS_URL'] ?? 'http://localhost:3000');
+define('API_URL', $_ENV['API_URL'] ?? 'http://localhost:3000');
 
 // ============================================================
 // Llamada a la API de Node.js
@@ -50,6 +49,18 @@ if (isset($_GET['action'])) {
             exit;
         }
         echo json_encode(consultarAPI('/api/dni/' . $dni));
+        exit;
+    }
+
+    if ($_GET['action'] === 'api_status') {
+        $t0     = microtime(true);
+        $result = consultarAPI('/api/status');
+        $ms     = round((microtime(true) - $t0) * 1000);
+        if (isset($result['status']) && $result['status'] === 'ok') {
+            echo json_encode(['ok' => true, 'ms' => $ms]);
+        } else {
+            echo json_encode(['ok' => false]);
+        }
         exit;
     }
 
@@ -433,20 +444,17 @@ if (isset($_GET['action'])) {
 </div>
 
 <script>
-const API_BASE = '<?= htmlspecialchars(rtrim(API_JS_URL, '/')) ?>';
-
 async function checkAPI() {
   const badge = document.getElementById('apiBadge');
   const text  = document.getElementById('badgeText');
   badge.className = 'badge-api';
   text.textContent = 'verificando';
-  const t0 = Date.now();
   try {
-    const r  = await fetch(`${API_BASE}/api/status`);
-    const ms = Date.now() - t0;
-    if (r.ok) {
+    const r    = await fetch('index.php?action=api_status');
+    const data = await r.json();
+    if (data.ok) {
       badge.className = 'badge-api online';
-      text.textContent = `online · ${ms}ms`;
+      text.textContent = `online · ${data.ms}ms`;
     } else throw new Error();
   } catch {
     badge.className = 'badge-api offline';
